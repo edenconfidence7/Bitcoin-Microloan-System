@@ -4,6 +4,9 @@
 (define-constant max-loan-amount u100000000)
 (define-constant loan-duration u144)
 (define-constant liquidation-penalty u10)
+(define-constant base-interest-rate u3)
+(define-constant max-interest-rate u15)
+(define-constant credit-score-threshold u10)
 
 (define-data-var total-loans uint u0)
 (define-data-var total-collateral uint u0)
@@ -27,6 +30,8 @@
         total-borrowed: uint,
         active-loans: uint,
         completed-loans: uint,
+        defaulted-loans: uint,
+        credit-score: uint,
     }
 )
 
@@ -49,6 +54,54 @@
     )
 )
 
+(define-read-only (calculate-credit-score (borrower principal))
+    (match (get-borrower-info borrower)
+        stats (let (
+                (completed (get completed-loans stats))
+                (defaulted (get defaulted-loans stats))
+                (total-history (+ completed defaulted))
+            )
+            (if (> total-history u0)
+                (let ((score (/ (* completed u100) total-history)))
+                    (if (> score u100)
+                        u100
+                        score
+                    )
+                )
+                u50
+            )
+        )
+        u50
+    )
+)
+
+(define-read-only (calculate-dynamic-interest-rate
+        (borrower principal)
+        (loan-amount uint)
+        (collateral-amount uint)
+    )
+    (let (
+            (credit-score (calculate-credit-score borrower))
+            (collateral-bonus (if (> collateral-amount (* loan-amount u2))
+                u1
+                u0
+            ))
+            (size-penalty (if (> loan-amount u50000000)
+                u2
+                u0
+            ))
+        )
+        (let ((calculated-rate (+ base-interest-rate (- u10 (/ credit-score u10)) size-penalty
+                (- u0 collateral-bonus)
+            )))
+            (if (> calculated-rate max-interest-rate)
+                max-interest-rate
+                calculated-rate
+            )
+        )
+    )
+)
+
 (define-public (request-loan
         (loan-amount uint)
         (collateral-amount uint)
@@ -56,6 +109,9 @@
     (let (
             (loan-id (var-get total-loans))
             (required-collateral (calculate-required-collateral loan-amount))
+            (dynamic-rate (calculate-dynamic-interest-rate tx-sender loan-amount
+                collateral-amount
+            ))
         )
         (asserts! (>= collateral-amount required-collateral) (err u1))
         (asserts!
@@ -70,7 +126,7 @@
             start-height: burn-block-height,
             end-height: (+ burn-block-height loan-duration),
             status: "active",
-            interest-rate: u5,
+            interest-rate: dynamic-rate,
         })
         (var-set total-loans (+ loan-id u1))
         (var-set total-collateral
@@ -124,7 +180,7 @@
                 (var-set total-collateral
                     (- (var-get total-collateral) (get collateral-amount loan))
                 )
-                (update-borrower-stats (get borrower loan) u0 false)
+                (update-borrower-stats-liquidated (get borrower loan))
                 (ok true)
             )
         )
@@ -148,6 +204,8 @@
                 (+ (get completed-loans stats) u1)
                 (get completed-loans stats)
             ),
+            defaulted-loans: (get defaulted-loans stats),
+            credit-score: (calculate-credit-score borrower),
         })
         (map-set borrower-stats { borrower: borrower } {
             total-borrowed: loan-amount,
@@ -156,6 +214,27 @@
                 u0
             ),
             completed-loans: u0,
+            defaulted-loans: u0,
+            credit-score: u50,
+        })
+    )
+)
+
+(define-private (update-borrower-stats-liquidated (borrower principal))
+    (match (get-borrower-info borrower)
+        stats (map-set borrower-stats { borrower: borrower } {
+            total-borrowed: (get total-borrowed stats),
+            active-loans: (- (get active-loans stats) u1),
+            completed-loans: (get completed-loans stats),
+            defaulted-loans: (+ (get defaulted-loans stats) u1),
+            credit-score: (calculate-credit-score borrower),
+        })
+        (map-set borrower-stats { borrower: borrower } {
+            total-borrowed: u0,
+            active-loans: u0,
+            completed-loans: u0,
+            defaulted-loans: u1,
+            credit-score: u0,
         })
     )
 )
