@@ -187,6 +187,26 @@
         (err u8)
     )
 )
+(define-public (withdraw-excess-collateral (loan-id uint))
+    (let (
+            (loan (unwrap! (get-loan loan-id) (err u9)))
+            (borrower (get borrower loan))
+            (loan-amount (get loan-amount loan))
+            (current-collateral (get collateral-amount loan))
+            (required-collateral (calculate-required-collateral loan-amount))
+            (excess (- current-collateral required-collateral))
+        )
+        (asserts! (is-eq tx-sender borrower) (err u10))
+        (asserts! (is-eq (get status loan) "active") (err u11))
+        (asserts! (> excess u0) (err u12))
+        (try! (as-contract (stx-transfer? excess (as-contract tx-sender) borrower)))
+        (map-set loans { loan-id: loan-id }
+            (merge loan { collateral-amount: required-collateral })
+        )
+        (var-set total-collateral (- (var-get total-collateral) excess))
+        (ok true)
+    )
+)
 
 (define-private (update-borrower-stats
         (borrower principal)
