@@ -62,6 +62,6 @@ plan:
         - emulated-contract-publish:
             contract-name: Bitcoin-Microloan-System
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/Bitcoin-Microloan-System.clar
+            path: "contracts\\Bitcoin-Microloan-System.clar"
             clarity-version: 3
       epoch: "3.1"
