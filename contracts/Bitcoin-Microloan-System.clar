@@ -10,6 +10,7 @@
 
 (define-data-var total-loans uint u0)
 (define-data-var total-collateral uint u0)
+(define-data-var is-paused bool false)
 
 (define-map loans
     { loan-id: uint }
@@ -41,6 +42,10 @@
 
 (define-read-only (get-borrower-info (borrower principal))
     (map-get? borrower-stats { borrower: borrower })
+)
+
+(define-read-only (get-paused)
+    (var-get is-paused)
 )
 
 (define-read-only (calculate-required-collateral (loan-amount uint))
@@ -102,6 +107,45 @@
     )
 )
 
+(define-read-only (get-loan-offer
+        (borrower principal)
+        (loan-amount uint)
+        (collateral-amount uint)
+    )
+    (let (
+            (required-collateral (calculate-required-collateral loan-amount))
+            (meets-collateral (>= collateral-amount required-collateral))
+            (within-range (and (>= loan-amount min-loan-amount) (<= loan-amount max-loan-amount)))
+            (interest-rate (calculate-dynamic-interest-rate borrower loan-amount
+                collateral-amount
+            ))
+            (premium (calculate-insurance-premium loan-amount borrower))
+            (coverage (calculate-insurance-coverage loan-amount))
+            (paused-status (var-get is-paused))
+        )
+        {
+            borrower: borrower,
+            loan-amount: loan-amount,
+            collateral-amount: collateral-amount,
+            required-collateral: required-collateral,
+            meets-collateral: meets-collateral,
+            within-range: within-range,
+            is-paused: paused-status,
+            interest-rate: interest-rate,
+            insurance-premium: premium,
+            insurance-coverage: coverage,
+        }
+    )
+)
+
+(define-public (set-paused (new-status bool))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) (err u19))
+        (var-set is-paused new-status)
+        (ok new-status)
+    )
+)
+
 (define-public (request-loan
         (loan-amount uint)
         (collateral-amount uint)
@@ -113,6 +157,7 @@
                 collateral-amount
             ))
         )
+        (asserts! (not (var-get is-paused)) (err u20))
         (asserts! (>= collateral-amount required-collateral) (err u1))
         (asserts!
             (and (>= loan-amount min-loan-amount) (<= loan-amount max-loan-amount))
@@ -318,16 +363,19 @@
     (map-get? insurance-stats { borrower: borrower })
 )
 
-(define-read-only (calculate-insurance-premium (loan-amount uint) (borrower principal))
-    (let (
-        (credit-score (calculate-credit-score borrower))
-        (base-premium (/ (* loan-amount insurance-base-premium) u100))
-        (credit-adjustment (if (> credit-score u70) 
-            u0 
-            (/ (* base-premium (- u70 credit-score)) u100)
-        ))
-        (calculated-premium (+ base-premium credit-adjustment))
+(define-read-only (calculate-insurance-premium
+        (loan-amount uint)
+        (borrower principal)
     )
+    (let (
+            (credit-score (calculate-credit-score borrower))
+            (base-premium (/ (* loan-amount insurance-base-premium) u100))
+            (credit-adjustment (if (> credit-score u70)
+                u0
+                (/ (* base-premium (- u70 credit-score)) u100)
+            ))
+            (calculated-premium (+ base-premium credit-adjustment))
+        )
         (if (> calculated-premium (/ (* loan-amount insurance-max-premium) u100))
             (/ (* loan-amount insurance-max-premium) u100)
             (if (< calculated-premium min-insurance-amount)
@@ -339,12 +387,14 @@
 )
 
 (define-read-only (calculate-insurance-coverage (loan-amount uint))
-    (/ (* (/ (* loan-amount liquidation-penalty) u100) insurance-coverage-ratio) u100)
+    (/ (* (/ (* loan-amount liquidation-penalty) u100) insurance-coverage-ratio)
+        u100
+    )
 )
 
 (define-read-only (is-insurance-valid (policy-id uint))
     (match (get-insurance-policy policy-id)
-        policy (and 
+        policy (and
             (is-eq (get status policy) "active")
             (<= burn-block-height (get end-height policy))
         )
@@ -355,19 +405,20 @@
 ;; Public functions for insurance
 (define-public (purchase-insurance (loan-id uint))
     (let (
-        (loan (unwrap! (get-loan loan-id) (err u5)))
-        (policy-id (var-get total-insurance-policies))
-        (loan-amount (get loan-amount loan))
-        (premium (calculate-insurance-premium loan-amount tx-sender))
-        (coverage (calculate-insurance-coverage loan-amount))
-    )
+            (loan (unwrap! (get-loan loan-id) (err u5)))
+            (policy-id (var-get total-insurance-policies))
+            (loan-amount (get loan-amount loan))
+            (premium (calculate-insurance-premium loan-amount tx-sender))
+            (coverage (calculate-insurance-coverage loan-amount))
+        )
+        (asserts! (not (var-get is-paused)) (err u20))
         ;; Validate loan ownership and status
         (asserts! (is-eq (get borrower loan) tx-sender) (err u3))
         (asserts! (is-eq (get status loan) "active") (err u4))
-        
+
         ;; Transfer premium to contract
         (try! (stx-transfer? premium tx-sender (as-contract tx-sender)))
-        
+
         ;; Create insurance policy
         (map-set insurance-policies { policy-id: policy-id } {
             loan-id: loan-id,
@@ -379,52 +430,57 @@
             status: "active",
             claimed: false,
         })
-        
+
         ;; Update totals
         (var-set total-insurance-policies (+ policy-id u1))
-        (var-set total-insurance-premiums (+ (var-get total-insurance-premiums) premium))
-        
+        (var-set total-insurance-premiums
+            (+ (var-get total-insurance-premiums) premium)
+        )
+
         ;; Update borrower insurance stats
         (update-insurance-stats tx-sender premium true)
-        
+
         (ok policy-id)
     )
 )
 
-(define-public (claim-insurance (policy-id uint) (loan-id uint))
-    (let (
-        (policy (unwrap! (get-insurance-policy policy-id) (err u13)))
-        (loan (unwrap! (get-loan loan-id) (err u5)))
-        (coverage-amount (get coverage-amount policy))
+(define-public (claim-insurance
+        (policy-id uint)
+        (loan-id uint)
     )
+    (let (
+            (policy (unwrap! (get-insurance-policy policy-id) (err u13)))
+            (loan (unwrap! (get-loan loan-id) (err u5)))
+            (coverage-amount (get coverage-amount policy))
+        )
         ;; Validate policy ownership and loan match
         (asserts! (is-eq (get borrower policy) tx-sender) (err u3))
         (asserts! (is-eq (get loan-id policy) loan-id) (err u17))
-        
+
         ;; Validate loan has been liquidated
         (asserts! (is-eq (get status loan) "liquidated") (err u18))
-        
+
         ;; Validate policy is active and not expired
         (asserts! (is-insurance-valid policy-id) (err u14))
-        
+
         ;; Validate not already claimed
         (asserts! (not (get claimed policy)) (err u17))
-        
+
         ;; Transfer coverage amount to borrower
         (try! (as-contract (stx-transfer? coverage-amount (as-contract tx-sender) tx-sender)))
-        
+
         ;; Mark policy as claimed
         (map-set insurance-policies { policy-id: policy-id }
-            (merge policy { 
+            (merge policy {
                 status: "claimed",
-                claimed: true 
+                claimed: true,
             })
         )
-        
+
         ;; Update claim statistics
         (var-set total-insurance-claims (+ (var-get total-insurance-claims) u1))
         (update-insurance-stats-claim tx-sender coverage-amount)
-        
+
         (ok coverage-amount)
     )
 )
@@ -436,25 +492,27 @@
             (asserts! (is-loan-expired loan-id) (err u6))
             (asserts! (is-eq (get status loan) "active") (err u7))
             (let (
-                (base-penalty (/ (* (get collateral-amount loan) liquidation-penalty) u100))
-                ;; Simplified insurance check to avoid recursion
-                (policy-0 (get-insurance-policy u0))
-                (has-insurance-0 (if (is-some policy-0)
-                    (let ((policy (unwrap-panic policy-0)))
-                        (and 
-                            (is-eq (get loan-id policy) loan-id)
-                            (is-eq (get status policy) "active")
-                            (<= burn-block-height (get end-height policy))
+                    (base-penalty (/ (* (get collateral-amount loan) liquidation-penalty) u100))
+                    ;; Simplified insurance check to avoid recursion
+                    (policy-0 (get-insurance-policy u0))
+                    (has-insurance-0 (if (is-some policy-0)
+                        (let ((policy (unwrap-panic policy-0)))
+                            (and
+                                (is-eq (get loan-id policy) loan-id)
+                                (is-eq (get status policy) "active")
+                                (<= burn-block-height (get end-height policy))
+                            )
                         )
-                    )
-                    false
-                ))
-                (actual-penalty (if has-insurance-0
-                    (/ (* base-penalty (- u100 insurance-coverage-ratio)) u100)
-                    base-penalty
-                ))
-                (return-amount (- (get collateral-amount loan) actual-penalty))
-            )
+                        false
+                    ))
+                    (actual-penalty (if has-insurance-0
+                        (/ (* base-penalty (- u100 insurance-coverage-ratio))
+                            u100
+                        )
+                        base-penalty
+                    ))
+                    (return-amount (- (get collateral-amount loan) actual-penalty))
+                )
                 (try! (as-contract (stx-transfer? return-amount (as-contract tx-sender)
                     (get borrower loan)
                 )))
@@ -475,14 +533,14 @@
     )
 )
 
-(define-private (update-insurance-stats 
-    (borrower principal) 
-    (premium uint) 
-    (is-new bool)
-)
+(define-private (update-insurance-stats
+        (borrower principal)
+        (premium uint)
+        (is-new bool)
+    )
     (match (get-insurance-stats borrower)
         stats (map-set insurance-stats { borrower: borrower } {
-            total-policies: (if is-new 
+            total-policies: (if is-new
                 (+ (get total-policies stats) u1)
                 (get total-policies stats)
             ),
@@ -502,12 +560,13 @@
     )
 )
 
-(define-private (update-insurance-stats-claim 
-    (borrower principal) 
-    (claim-amount uint)
-)
+(define-private (update-insurance-stats-claim
+        (borrower principal)
+        (claim-amount uint)
+    )
     (match (get-insurance-stats borrower)
-        stats (map-set insurance-stats { borrower: borrower }
+        stats
+        (map-set insurance-stats { borrower: borrower }
             (merge stats {
                 total-claims: (+ (get total-claims stats) u1),
                 active-policies: (- (get active-policies stats) u1),
