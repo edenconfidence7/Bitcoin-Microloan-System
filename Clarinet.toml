@@ -1,16 +1,21 @@
 [project]
-name = 'Bitcoin-Microloan-System'
-description = ''
+name = "Bitcoin-Microloan-System"
+description = ""
 authors = []
 telemetry = true
-cache_dir = '.\.cache'
+cache_dir = ".\\.cache"
 requirements = []
+
 [contracts.Bitcoin-Microloan-System]
-path = 'contracts/Bitcoin-Microloan-System.clar'
+path = "contracts/Bitcoin-Microloan-System.clar"
 clarity_version = 3
-epoch = 3.1
+epoch = "3.0"
+
+[repl]
+epoch = "3.0"
+
 [repl.analysis]
-passes = ['check_checker']
+passes = ["check_checker"]
 
 [repl.analysis.check_checker]
 strict = false
@@ -20,4 +25,4 @@ callee_filter = false
 
 [repl.remote_data]
 enabled = false
-api_url = 'https://api.hiro.so'
+api_url = "https://api.hiro.so"
