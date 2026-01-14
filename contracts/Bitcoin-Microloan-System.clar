@@ -576,3 +576,46 @@
         false
     )
 )
+
+(define-read-only (get-system-stats)
+    (let (
+            (loan-count (var-get total-loans))
+            (collateral-total (var-get total-collateral))
+            (policies-total (var-get total-insurance-policies))
+            (premiums-total (var-get total-insurance-premiums))
+            (claims-total (var-get total-insurance-claims))
+            (paused (var-get is-paused))
+            (average-collateral (if (> loan-count u0)
+                (/ collateral-total loan-count)
+                u0
+            ))
+        )
+        {
+            total-loans: loan-count,
+            total-collateral: collateral-total,
+            average-collateral-per-loan: average-collateral,
+            total-insurance-policies: policies-total,
+            total-insurance-premiums: premiums-total,
+            total-insurance-claims: claims-total,
+            is-paused: paused,
+        }
+    )
+)
+
+(define-read-only (get-borrower-capacity (borrower principal))
+    (let (
+            (score (calculate-credit-score borrower))
+            (eligible (>= score credit-score-threshold))
+            (suggested-max (if eligible
+                (/ (* max-loan-amount score) u100)
+                u0
+            ))
+        )
+        {
+            borrower: borrower,
+            credit-score: score,
+            meets-threshold: eligible,
+            suggested-max-loan: suggested-max,
+        }
+    )
+)
